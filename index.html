@@ -383,15 +383,31 @@ function fmtLat(v){return Math.abs(v).toFixed(4)+"\u00b0 "+(v>=0?"N":"S");}
 function fmtLon(v){return Math.abs(v).toFixed(4)+"\u00b0 "+(v>=0?"E":"W");}
 function fmtDate(ms){var d=new Date(ms);return d.getDate()+" "+MONTHS[d.getMonth()]+" "+d.getFullYear();}
 function timeText(ms){var d=new Date(ms);return pad2(d.getHours())+":"+pad2(d.getMinutes());}
-function dms(v,axes){
+/* Karla carries no prime glyphs, so fall back to straight marks rather than a missing glyph */
+function marksFor(face){
+  var fd=FONTS[face==="sans"?"ni":"si"];
+  return {m:fd.g[0x2032]?"\u2032":"'", s:fd.g[0x2033]?"\u2033":'"'};
+}
+function dms(v,axes,mk){
   var d=Math.abs(v),deg=Math.floor(d),mf=(d-deg)*60,mn=Math.floor(mf),sc=Math.round((mf-mn)*60);
   if(sc===60){sc=0;mn++;} if(mn===60){mn=0;deg++;}
-  return deg+"\u00b0 "+pad2(mn)+"\u2032 "+pad2(sc)+"\u2033 "+(v>=0?axes[0]:axes[1]);
+  return deg+"\u00b0 "+pad2(mn)+mk.m+" "+pad2(sc)+mk.s+" "+(v>=0?axes[0]:axes[1]);
+}
+/* characters the embedded subsets cannot set, so the print check can flag them */
+function unsupported(str,face){
+  var fd=FONTS[face==="sans"?"nr":"sr"], fi=FONTS[face==="sans"?"ni":"si"], bad={};
+  for(var i=0;i<str.length;i++){
+    var c=str.charCodeAt(i);
+    if(c===32) continue;
+    if(!fd.g[c]||!fi.g[c]) bad[str.charAt(i)]=1;
+  }
+  return Object.keys(bad);
 }
 function coordText(cfg){
   if(cfg.capCoordFmt==="off") return "";
   if(cfg.capCoordFmt==="dec") return fmtLat(cfg.lat)+"   "+fmtLon(cfg.lon);
-  return dms(cfg.lat,"NS")+"   "+dms(cfg.lon,"EW");
+  var mk=marksFor(cfg.capFace);
+  return dms(cfg.lat,"NS",mk)+"   "+dms(cfg.lon,"EW",mk);
 }
 function captionPlan(cfg,W){
   var fs=W*0.021*cfg.capScale;
@@ -558,11 +574,22 @@ function build(cfg){
       var dr=swid*(cfg.hours===0?1.85:0.85)+0.05;
       if(glows) fillP(blooms,{t:"circle",cx:finalPt[0],cy:finalPt[1],r:dr*4.5},pal.glow,0.10*cfg.bloom);
       fillP(dots,{t:"circle",cx:finalPt[0],cy:finalPt[1],r:dr},col,Math.min(1,op+0.15));
-      if(cfg.labels&&NAMES[i]&&mag<=2.0&&finalPt[0]>px+2&&finalPt[0]<px+innerW-2&&finalPt[1]>py+6&&finalPt[1]<py+innerH-2){
-        var ts=Math.max(3.1,W*0.0135); minText=Math.min(minText,ts);
-        var tp=paint(pal.ink,0.82);
-        tags.push({t:"text",x:finalPt[0]+W*0.009,y:finalPt[1]-W*0.008,str:NAMES[i],size:ts,
-                   face:"serif",italic:true,anchor:"start",fill:tp.c,op:tp.o,track:0});
+      if(cfg.labels&&NAMES[i]&&mag<=2.0){
+        var ts=Math.max(3.1,W*0.0135);
+        var lw=textWidth(NAMES[i],ts,"si",0);
+        var padL=1.5, L=px+padL, R=px+innerW-padL, Tp=py+padL, Bt=py+innerH-padL;
+        var ox=W*0.009, oy=W*0.008;
+        var anc="start", tx=finalPt[0]+ox, ty=finalPt[1]-oy, fits=true;
+        if(tx+lw>R){ anc="end"; tx=finalPt[0]-ox; }          /* swing the name to the left of the star */
+        fits = (anc==="start") ? (tx>=L&&tx+lw<=R) : (tx-lw>=L&&tx<=R);
+        if(fits&&ty-ts*0.78<Tp) ty=finalPt[1]+oy+ts*0.78;    /* drop below the star instead of above */
+        if(ty+ts*0.24>Bt) fits=false;
+        if(fits&&finalPt[0]>=L&&finalPt[0]<=R&&finalPt[1]>=Tp&&finalPt[1]<=Bt){
+          minText=Math.min(minText,ts);
+          var tp=paint(pal.ink,0.82);
+          tags.push({t:"text",x:tx,y:ty,str:NAMES[i],size:ts,face:"serif",italic:true,
+                     anchor:anc,fill:tp.c,op:tp.o,track:0});
+        }
       }
     }
   }
@@ -652,12 +679,14 @@ function build(cfg){
     }
   }
 
+  var capChars=unsupported((cfg.captionText||"")+(cfg.captionSub||""),cfg.capFace);
+
   return {bg:bg,art:art,top:top,
     clip:{x:px,y:py,w:innerW,h:innerH},
     page:{w:pageW,h:pageH,bleed:B,trimW:W,trimH:H},
     stats:{arcs:cores.length,up:upCount,circumpolar:circumpolar,poleAlt:latAbs,sweep:sweepDeg,
       visible:visible,minSW:isFinite(minSW)?minSW:null,minText:isFinite(minText)?minText:null,
-      alpha:hasAlpha,figLines:figLines,mwDiscs:mwCount,
+      alpha:hasAlpha,figLines:figLines,mwDiscs:mwCount,capChars:capChars,labels:tags.length,
       objects:bg.length+art.length+top.length}};
 }
 
@@ -917,6 +946,8 @@ function render(){
   rows+=li(s.alpha?"warn":"ok","Live transparency",s.alpha?"present \u2014 fine unless the printer wants PDF/X-1a":"none");
   rows+=li("ok","Colour","sRGB \u2014 send as is, the printer converts");
   rows+=li("ok","PDF fonts",(cfg.capFace==="serif"?"Newsreader":"Karla")+", subset and embedded");
+  rows+=li(s.capChars.length?"warn":"ok","Caption characters",
+    s.capChars.length?s.capChars.length+" not in the embedded font: "+s.capChars.join(" "):"all supported");
   rows+=li("ok","Vector objects",s.objects.toLocaleString());
   $("precheck").innerHTML=rows;
 }
